@@ -798,4 +798,4 @@ with gr.Blocks() as app:
     )
 
 if __name__ == "__main__":
-    app.launch(share=args.share, server_name="0.0.0.0" if args.listen else "127.0.0.1")
+    app.queue().launch(share=args.share, server_name="0.0.0.0" if args.listen else "127.0.0.1")
