@@ -489,4 +489,6 @@ class Renderer:
             if hasattr(self, 'img0'):
                 del self.img0
 
+        return res
+
 #----------------------------------------------------------------------------
