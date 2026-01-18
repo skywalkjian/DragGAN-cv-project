@@ -21,8 +21,10 @@ import matplotlib.cm
 import dnnlib
 from torch_utils.ops import upfirdn2d
 import legacy # pylint: disable=import-error
-from .trackers import get_tracker
-from .mask_handlers import get_mask_handler
+try:
+    from .trackers import get_tracker
+except ImportError:
+    from trackers import get_tracker
 
 #----------------------------------------------------------------------------
 
@@ -86,15 +88,13 @@ class Renderer:
             self._end_event     = torch.cuda.Event(enable_timing=True)
         self._disable_timing = disable_timing
         self._net_layers    = dict()    # {cache_key: [dnnlib.EasyDict, ...], ...}
+        # Integration of modular tracker
         self.tracker        = get_tracker('DragGAN (Baseline)')
-        self.mask_handler   = get_mask_handler('DragGAN (Baseline)')
         self.prev_img       = None
 
     def set_tracker(self, tracker_name):
+        """Updates the tracker used by the renderer."""
         self.tracker = get_tracker(tracker_name)
-
-    def set_mask_handler(self, mask_handler_name):
-        self.mask_handler = get_mask_handler(mask_handler_name)
 
     def get_resolution(self, pkl):
         G = self.get_network(pkl, 'G_ema')
@@ -289,6 +289,7 @@ class Renderer:
         print('    Remain feat_refs and points0_pt')
 
     def _preprocess_for_tracking(self, feat, img, points, targets, track_res=512):
+        """Pre-processes features and images for tracking at a unified resolution."""
         h_orig = img.shape[2]
         scale_track = track_res / h_orig
         
@@ -362,8 +363,6 @@ class Renderer:
             self.prev_img = None
             if self.tracker is not None:
                 self.tracker.reset()
-            if hasattr(self, 'mask_handler') and hasattr(self.mask_handler, 'reset'):
-                self.mask_handler.reset()
             torch.cuda.empty_cache()
         self.points = points
 
@@ -386,23 +385,23 @@ class Renderer:
                     self.feat_refs.append(self.feat0_resize[:,:,py,px])
                 self.points0_pt = torch.Tensor(points).unsqueeze(0).to(self._device) # 1, N, 2
 
-            # Mask handling and Feature Blending
-            mask_loss = 0
+            # Inline Mask handling (to avoid mask-related code changes in separate files)
+            loss_mask = 0
             if mask is not None:
-                mask_loss, feat_resize = self.mask_handler.handle_mask(
-                    feat_resize, self.feat0_resize, mask, lambda_mask=lambda_mask
-                )
+                mask_tensor = torch.from_numpy(mask).to(self._device).float()
+                mask_tensor = F.interpolate(mask_tensor.unsqueeze(0).unsqueeze(0), [h, w], mode='nearest')
+                loss_mask = lambda_mask * F.l1_loss(feat_resize * (1 - mask_tensor), self.feat0_resize * (1 - mask_tensor))
 
-            # Point tracking with selected tracker
+            # Point tracking with selected modular tracker
             feat_for_track, img_track, points_track, targets_track, scale_track = self._preprocess_for_tracking(
                 feat, img, points, targets, track_res=512
             )
             
-            # Call tracker with unified resolution
+            # Call tracker with unified resolution (512x512)
             points_track = self.tracker.track(feat_for_track, points_track, (r2 * scale_track), 512, 512, 
                                               targets=targets_track, curr_img=img_track)
             
-            # Scale points back to original resolution
+            # Scale tracked points back to original resolution
             points = [[p[0] / scale_track, p[1] / scale_track] for p in points_track]
 
             res.points = [[point[0], point[1]] for point in points]
@@ -411,7 +410,7 @@ class Renderer:
             loss_motion = 0
             res.stop = True
             
-            # Use the (possibly modified) feat_resize for supervision
+            # Use the feat_resize for supervision
             f_s = feat_resize
             
             for j, point in enumerate(points):
@@ -440,8 +439,8 @@ class Renderer:
             # Add extra supervision loss from tracker (Modular Interface)
             loss += self.tracker.compute_supervision_loss(feat, points, targets, curr_img=img)
             
-            # Add mask loss from handler
-            loss += mask_loss
+            # Add mask loss
+            loss += loss_mask
 
             loss += reg * F.l1_loss(ws, self.w0)  # latent code regularization
             if not res.stop:
@@ -479,7 +478,7 @@ class Renderer:
             
             # Get original image for comparison
             if not hasattr(self, 'img0'):
-                # We need to store the first image of the drag session
+                # Store the first image of the drag session
                 self.img0 = curr_img_np
             
             diff = np.abs(curr_img_np - self.img0)

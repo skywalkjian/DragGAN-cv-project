@@ -264,7 +264,7 @@ with gr.Blocks() as app:
                         gr.Markdown(value='Drag', show_label=False)
                     with gr.Column(scale=4, min_width=10):
                         form_tracker_dropdown = gr.Dropdown(
-                            choices=['DragGAN (Baseline)', 'RAFT Large (Optical Flow)', 'Deep Particle (PIPs-like)', 'PIPs-Inspired (Momentum)', 'WCAT (Weighted Context-Aware Tracker)'],
+                            choices=['DragGAN (Baseline)', 'RAFT Large (Optical Flow)', 'Deep Particle (PIPs-like)', 'WCAT (Weighted Context-Aware Tracker)'],
                             label="Tracking Method",
                             value='DragGAN (Baseline)',
                         )
@@ -289,7 +289,7 @@ with gr.Blocks() as app:
                         gr.Markdown(value='Mask', show_label=False)
                     with gr.Column(scale=4, min_width=10):
                         form_mask_handler_dropdown = gr.Dropdown(
-                            choices=['DragGAN (Baseline)', 'Feature Blending (Robust)'],
+                            choices=['DragGAN (Baseline)'],
                             label="Masking Method",
                             value='DragGAN (Baseline)',
                         )
@@ -476,6 +476,8 @@ with gr.Blocks() as app:
 
     def on_change_tracker(tracker_name, global_state):
         global_state['tracker_name'] = tracker_name
+        # Update tracker in renderer for real-time switching
+        global_state['renderer'].set_tracker(tracker_name)
         return global_state
 
     form_tracker_dropdown.change(
@@ -553,147 +555,99 @@ with gr.Blocks() as app:
                     if p_start is None or p_end is None:
                         continue
 
+                    # Gradio image output format: [y, x]
+                    p_in_pixels.append([p_start[1], p_start[0]])
+                    t_in_pixels.append([p_end[1], p_end[0]])
+                    valid_points.append(key_point)
                 except KeyError:
                     continue
 
-                p_in_pixels.append(p_start)
-                t_in_pixels.append(p_end)
-                valid_points.append(key_point)
+            # Update tracker name in renderer before starting
+            global_state['renderer'].set_tracker(global_state['tracker_name'])
 
-            mask = torch.tensor(global_state['mask']).float()
-            drag_mask = 1 - mask
-
-            renderer: Renderer = global_state["renderer"]
-            renderer.set_tracker(global_state['tracker_name'])
-            renderer.set_mask_handler(global_state['mask_handler_name'])
-            global_state['temporal_params']['stop'] = False
-            global_state['editing_state'] = 'running'
-
-            # reverse points order
-            p_to_opt = reverse_point_pairs(p_in_pixels)
-            t_to_opt = reverse_point_pairs(t_in_pixels)
-            print('Running with:')
-            print(f'    Source: {p_in_pixels}')
-            print(f'    Target: {t_in_pixels}')
-            step_idx = 0
+            # Optimization loop
+            step = 0
             while True:
-                if global_state["temporal_params"]["stop"]:
+                if global_state['temporal_params'].get('stop', False):
                     break
-
-                # do drage here!
-                renderer._render_drag_impl(
+                
+                # Perform one step of drag optimization
+                # This uses the unified renderer logic with the selected tracker
+                res = global_state['renderer']._render_drag_impl(
                     global_state['generator_params'],
-                    p_to_opt,  # point
-                    t_to_opt,  # target
-                    drag_mask,  # mask,
-                    global_state['params']['motion_lambda'],  # lambda_mask
-                    reg=0,
-                    feature_idx=5,  # NOTE: do not support change for now
-                    r1=global_state['params']['r1_in_pixels'],  # r1
-                    r2=global_state['params']['r2_in_pixels'],  # r2
-                    # random_seed     = 0,
-                    # noise_mode      = 'const',
-                    trunc_psi=global_state['params']['trunc_psi'],
-                    # force_fp32      = False,
-                    # layer_name      = None,
-                    # sel_channels    = 3,
-                    # base_channel    = 0,
-                    # img_scale_db    = 0,
-                    # img_normalize   = False,
-                    # untransform     = False,
                     is_drag=True,
-                    to_pil=True)
+                    points=p_in_pixels,
+                    targets=t_in_pixels,
+                    mask=global_state['mask'],
+                    lambda_mask=global_state['params']['motion_lambda'],
+                    reg=0,
+                    to_pil=True
+                )
+                
+                # Update points for next iteration based on tracker output
+                p_in_pixels = res['points']
+                
+                # Update global state points for visualization
+                for i, key in enumerate(valid_points):
+                    global_state['points'][key]['start_temp'] = [p_in_pixels[i][1], p_in_pixels[i][0]]
 
-                # Sync points from renderer result
-                p_to_opt = global_state['generator_params'].points
-
-                if step_idx % global_state['draw_interval'] == 0:
-                    print('Current Source:')
-                    for key_point, p_i, t_i in zip(valid_points, p_to_opt,
-                                                   t_to_opt):
-                        global_state["points"][key_point]["start_temp"] = [
-                            p_i[1],
-                            p_i[0],
-                        ]
-                        global_state["points"][key_point]["target"] = [
-                            t_i[1],
-                            t_i[0],
-                        ]
-                        start_temp = global_state["points"][key_point][
-                            "start_temp"]
-                        print(f'    {start_temp}')
-
-                    image_result = global_state['generator_params']['image']
-                    diff_map = getattr(global_state['generator_params'], 'diff_map', None)
-                    
-                    image_draw = update_image_draw(
-                        image_result,
+                step += 1
+                if step % global_state['draw_interval'] == 0:
+                    image_show = update_image_draw(
+                        res['image'],
                         global_state['points'],
                         global_state['mask'],
                         global_state['show_mask'],
-                        global_state,
+                        global_state
                     )
-                    global_state['images']['image_raw'] = image_result
+                    
+                    # Calculate difference map if needed (optional visualization)
+                    # For now, just yield the current image
+                    yield (
+                        global_state,
+                        step,
+                        image_show,
+                        gr.Button.update(interactive=False),
+                        gr.Button.update(interactive=False),
+                        gr.Button.update(interactive=False),
+                        gr.Button.update(interactive=False),
+                        gr.Button.update(interactive=False),
+                        gr.Radio.update(interactive=False),
+                        gr.Button.update(interactive=False),
+                        gr.Button.update(interactive=True),
+                        gr.Dropdown.update(interactive=False),
+                        gr.Dropdown.update(interactive=False),
+                        gr.Dropdown.update(interactive=False),
+                        gr.Number.update(interactive=False),
+                        gr.Number.update(interactive=False),
+                        gr.Button.update(interactive=False),
+                        gr.Button.update(interactive=False),
+                        gr.Checkbox.update(interactive=False),
+                        gr.Number.update(interactive=False),
+                    )
 
-                yield (
-                    global_state,       # 1
-                    step_idx,           # 2
-                    global_state['images']['image_show'], # 3
-                    diff_map,           # 4
-                    gr.Button.update(interactive=False), # 5
-                    gr.Button.update(interactive=False), # 6
-                    gr.Button.update(interactive=False), # 7
-                    gr.Button.update(interactive=False), # 8
-                    gr.Button.update(interactive=False), # 9
-                    gr.Radio.update(interactive=False),  # 10
-                    gr.Button.update(interactive=False), # 11
-                    gr.Button.update(interactive=True),  # 12
-                    gr.Dropdown.update(interactive=False), # 13
-                    gr.Dropdown.update(interactive=False), # 14
-                    gr.Dropdown.update(interactive=False), # 15
-                    gr.Number.update(interactive=False), # 16
-                    gr.Number.update(interactive=False), # 17
-                    gr.Checkbox.update(interactive=False), # 18
-                    gr.Number.update(interactive=False), # 19
-                )
-
-                # increate step
-                step_idx += 1
-
-            image_result = global_state['generator_params']['image']
-            global_state['images']['image_raw'] = image_result
-            image_draw = update_image_draw(image_result,
-                                           global_state['points'],
-                                           global_state['mask'],
-                                           global_state['show_mask'],
-                                           global_state)
-
-            # fp = NamedTemporaryFile(suffix=".png", delete=False)
-            # image_result.save(fp, "PNG")
-
-            global_state['editing_state'] = 'add_points'
-            diff_map = getattr(global_state['generator_params'], 'diff_map', None)
-
+            # After stopping, restore interactive UI
             yield (
-                global_state,       # 1
-                0,                  # 2
-                global_state['images']['image_show'], # 3
-                diff_map,           # 4
-                gr.Button.update(interactive=True), # 5
-                gr.Button.update(interactive=True), # 6
-                gr.Button.update(interactive=True), # 7
-                gr.Button.update(interactive=True), # 8
-                gr.Button.update(interactive=True), # 9
-                gr.Radio.update(interactive=True),  # 10
-                gr.Button.update(interactive=True), # 11
-                gr.Button.update(interactive=False), # 12
-                gr.Dropdown.update(interactive=True), # 13
-                gr.Dropdown.update(interactive=True), # 14
-                gr.Dropdown.update(interactive=True), # 15
-                gr.Number.update(interactive=True),   # 16
-                gr.Number.update(interactive=True),   # 17
-                gr.Checkbox.update(interactive=True), # 18
-                gr.Number.update(interactive=True),   # 19
+                global_state,
+                step,
+                global_state['images']['image_show'],
+                gr.Button.update(interactive=True),
+                gr.Button.update(interactive=True),
+                gr.Button.update(interactive=True),
+                gr.Button.update(interactive=True),
+                gr.Button.update(interactive=True),
+                gr.Radio.update(interactive=True),
+                gr.Button.update(interactive=True),
+                gr.Button.update(interactive=False),
+                gr.Dropdown.update(interactive=True),
+                gr.Dropdown.update(interactive=True),
+                gr.Dropdown.update(interactive=True),
+                gr.Number.update(interactive=True),
+                gr.Number.update(interactive=True),
+                gr.Button.update(interactive=True),
+                gr.Button.update(interactive=True),
+                gr.Checkbox.update(interactive=True),
+                gr.Number.update(interactive=True),
             )
 
     form_start_btn.click(
@@ -703,80 +657,59 @@ with gr.Blocks() as app:
             global_state,
             form_steps_number,
             form_image,
-            form_diff_image, # Added diff image
-            # form_download_result_file,
-            # >>> buttons
             form_reset_image,
             enable_add_points,
-            enable_add_mask,
             undo_points,
             form_reset_mask_btn,
+            enable_add_mask,
             form_latent_space,
             form_start_btn,
             form_stop_btn,
-            # <<< buttonm
-            # >>> inputs comps
             form_pretrained_dropdown,
             form_tracker_dropdown,
-            form_mask_handler_dropdown, # Added
+            form_mask_handler_dropdown,
             form_seed_number,
             form_lr_number,
-            show_mask,
             form_lambda_number,
+            form_draw_interval_number,
+            show_mask,
+            form_steps_number,
         ],
     )
 
     def on_click_stop(global_state):
-        """Function to handle stop button is clicked.
-        1. send a stop signal by set global_state["temporal_params"]["stop"] as True
-        2. Disable Stop button
-        """
-        global_state["temporal_params"]["stop"] = True
-
-        return global_state, gr.Button.update(interactive=False)
+        global_state['temporal_params']['stop'] = True
+        return global_state
 
     form_stop_btn.click(on_click_stop,
                         inputs=[global_state],
-                        outputs=[global_state, form_stop_btn])
-
-    form_draw_interval_number.change(
-        partial(
-            on_change_single_global_state,
-            "draw_interval",
-            map_transform=lambda x: int(x),
-        ),
-        inputs=[form_draw_interval_number, global_state],
-        outputs=[global_state],
-    )
+                        outputs=[global_state])
 
     def on_click_remove_point(global_state):
-        choice = global_state["curr_point"]
-        del global_state["points"][choice]
+        global_state['points'] = dict()
+        global_state['curr_point'] = None
+        global_state['curr_type_point'] = 'start'
+        return global_state, global_state['images']['image_show']
 
-        choices = list(global_state["points"].keys())
+    undo_points.click(
+        on_click_remove_point,
+        inputs=[global_state],
+        outputs=[global_state, form_image],
+    )
 
-        if len(choices) > 0:
-            global_state["curr_point"] = choices[0]
-
-        return (
-            gr.Dropdown.update(choices=choices, value=choices[0]),
-            global_state,
-        )
-
-    # Mask
     def on_click_reset_mask(global_state):
         global_state['mask'] = np.ones(
-            (
-                global_state["images"]["image_raw"].size[1],
-                global_state["images"]["image_raw"].size[0],
-            ),
-            dtype=np.uint8,
+            (global_state['images']['image_raw'].size[1],
+             global_state['images']['image_raw'].size[0]),
+            dtype=np.uint8)
+        image_draw = update_image_draw(
+            global_state['images']['image_raw'],
+            global_state['points'],
+            global_state['mask'],
+            global_state['show_mask'],
+            global_state,
         )
-        image_draw = update_image_draw(global_state['images']['image_raw'],
-                                       global_state['points'],
-                                       global_state['mask'],
-                                       global_state['show_mask'], global_state)
-        return global_state, image_draw
+        return global_state, image_show
 
     form_reset_mask_btn.click(
         on_click_reset_mask,
@@ -784,132 +717,10 @@ with gr.Blocks() as app:
         outputs=[global_state, form_image],
     )
 
-    # Image
-    def on_click_enable_draw(global_state, image):
-        """Function to start add mask mode.
-        1. Preprocess mask info from last state
-        2. Change editing state to add_mask
-        3. Set curr image with points and mask
-        """
-        global_state = preprocess_mask_info(global_state, image)
-        global_state['editing_state'] = 'add_mask'
-        image_raw = global_state['images']['image_raw']
-        image_draw = update_image_draw(image_raw, global_state['points'],
-                                       global_state['mask'], True,
-                                       global_state)
-        return (global_state,
-                gr.Image.update(value=image_draw, interactive=True))
-
-    def on_click_remove_draw(global_state, image):
-        """Function to start remove mask mode.
-        1. Preprocess mask info from last state
-        2. Change editing state to remove_mask
-        3. Set curr image with points and mask
-        """
-        global_state = preprocess_mask_info(global_state, image)
-        global_state['edinting_state'] = 'remove_mask'
-        image_raw = global_state['images']['image_raw']
-        image_draw = update_image_draw(image_raw, global_state['points'],
-                                       global_state['mask'], True,
-                                       global_state)
-        return (global_state,
-                gr.Image.update(value=image_draw, interactive=True))
-
-    enable_add_mask.click(on_click_enable_draw,
-                          inputs=[global_state, form_image],
-                          outputs=[
-                              global_state,
-                              form_image,
-                          ])
-
-    def on_click_add_point(global_state, image: dict):
-        """Function switch from add mask mode to add points mode.
-        1. Updaste mask buffer if need
-        2. Change global_state['editing_state'] to 'add_points'
-        3. Set current image with mask
-        """
-
-        global_state = preprocess_mask_info(global_state, image)
-        global_state['editing_state'] = 'add_points'
-        mask = global_state['mask']
-        image_raw = global_state['images']['image_raw']
-        image_draw = update_image_draw(image_raw, global_state['points'], mask,
-                                       global_state['show_mask'], global_state)
-
-        return (global_state,
-                gr.Image.update(value=image_draw, interactive=False))
-
-    enable_add_points.click(on_click_add_point,
-                            inputs=[global_state, form_image],
-                            outputs=[global_state, form_image])
-
-    def on_click_image(global_state, evt: gr.SelectData):
-        """This function only support click for point selection
-        """
-        xy = evt.index
-        if global_state['editing_state'] != 'add_points':
-            print(f'In {global_state["editing_state"]} state. '
-                  'Do not add points.')
-
-            return global_state, global_state['images']['image_show']
-
-        points = global_state["points"]
-
-        point_idx = get_latest_points_pair(points)
-        if point_idx is None:
-            points[0] = {'start': xy, 'target': None}
-            print(f'Click Image - Start - {xy}')
-        elif points[point_idx].get('target', None) is None:
-            points[point_idx]['target'] = xy
-            print(f'Click Image - Target - {xy}')
-        else:
-            points[point_idx + 1] = {'start': xy, 'target': None}
-            print(f'Click Image - Start - {xy}')
-
-        image_raw = global_state['images']['image_raw']
-        image_draw = update_image_draw(
-            image_raw,
-            global_state['points'],
-            global_state['mask'],
-            global_state['show_mask'],
-            global_state,
-        )
-
-        return global_state, image_draw
-
-    form_image.select(
-        on_click_image,
-        inputs=[global_state],
-        outputs=[global_state, form_image],
-    )
-
-    def on_click_clear_points(global_state):
-        """Function to handle clear all control points
-        1. clear global_state['points'] (clear_state)
-        2. re-init network
-        2. re-draw image
-        """
-        clear_state(global_state, target='point')
-
-        renderer: Renderer = global_state["renderer"]
-        renderer.feat_refs = None
-
-        image_raw = global_state['images']['image_raw']
-        image_draw = update_image_draw(image_raw, {}, global_state['mask'],
-                                       global_state['show_mask'], global_state)
-        return global_state, image_draw
-
-    undo_points.click(on_click_clear_points,
-                      inputs=[global_state],
-                      outputs=[global_state, form_image])
-
-    def on_click_show_mask(global_state, show_mask):
-        """Function to control whether show mask on image."""
+    def on_click_show_mask(show_mask, global_state):
         global_state['show_mask'] = show_mask
-
-        image_raw = global_state['images']['image_raw']
         image_draw = update_image_draw(
-            image_raw,
+            global_state['images']['image_raw'],
             global_state['points'],
             global_state['mask'],
             global_state['show_mask'],
@@ -919,10 +730,72 @@ with gr.Blocks() as app:
 
     show_mask.change(
         on_click_show_mask,
-        inputs=[global_state, show_mask],
+        inputs=[show_mask, global_state],
         outputs=[global_state, form_image],
     )
 
-gr.close_all()
-app.queue(concurrency_count=3, max_size=20)
-app.launch(share=args.share, server_name="0.0.0.0" if args.listen else "127.0.0.1")
+    def on_click_add_mask(global_state):
+        global_state['editing_state'] = 'add_mask'
+        return global_state
+
+    enable_add_mask.click(on_click_add_mask,
+                          inputs=[global_state],
+                          outputs=[global_state])
+
+    def on_click_add_points(global_state):
+        global_state['editing_state'] = 'add_points'
+        return global_state
+
+    enable_add_points.click(on_click_add_points,
+                            inputs=[global_state],
+                            outputs=[global_state])
+
+    def on_get_mask(image, global_state):
+        # image is a dict with 'image' and 'mask'
+        # we only need the mask
+        if 'mask' in image:
+            mask = get_valid_mask(image['mask'])
+            global_state['mask'] = mask
+        return global_state
+
+    def on_click_image(global_state, evt: gr.SelectData):
+        """Function to handle image click.
+        1. If editing_state is add_points:
+            1.1 If curr_type_point is start: add start point
+            1.2 If curr_type_point is target: add target point
+        2. If editing_state is add_mask:
+            (Handled by ImageMask component directly)
+        """
+        if global_state['editing_state'] == 'add_points':
+            y, x = evt.index
+            if global_state['curr_type_point'] == 'start':
+                # Add new point pair
+                point_idx = len(global_state['points'])
+                global_state['points'][point_idx] = {'start': [y, x], 'target': None}
+                global_state['curr_point'] = point_idx
+                global_state['curr_type_point'] = 'target'
+            else:
+                # Add target for current point
+                idx = global_state['curr_point']
+                global_state['points'][idx]['target'] = [y, x]
+                global_state['curr_type_point'] = 'start'
+                global_state['curr_point'] = None
+            
+            image_draw = update_image_draw(
+                global_state['images']['image_raw'],
+                global_state['points'],
+                global_state['mask'],
+                global_state['show_mask'],
+                global_state,
+            )
+            return global_state, image_draw
+        return global_state, global_state['images']['image_show']
+
+    form_image.select(
+        on_click_image,
+        inputs=[global_state],
+        outputs=[global_state, form_image],
+    )
+
+if __name__ == "__main__":
+    app.launch(share=args.share, server_name="0.0.0.0" if args.listen else "127.0.0.1")
