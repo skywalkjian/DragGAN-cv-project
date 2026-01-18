@@ -13,7 +13,7 @@ Our implementation enhances the original DragGAN framework with the following ke
 ### Demo Video (WCAT vs Baseline)
 
 <div align="center">
-  <video src="https://github.com/skywalkjian/DragGAN-cv-project/blob/main/demo.mp4?raw=true" controls="controls" muted="muted" style="max-width: 100%;"></video>
+  <p><b><a href="demo.mp4">🎬 Click here to watch the Demo Video</a></b></p>
   <p><i>WCAT demonstrates superior robustness in complex texture scenarios (e.g., Lion case) compared to the baseline.</i></p>
 </div>
 
