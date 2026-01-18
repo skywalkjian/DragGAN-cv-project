@@ -72,6 +72,9 @@ def init_images(global_state):
     else:
         state = global_state
 
+    if not isinstance(state['generator_params'], dnnlib.EasyDict):
+        state['generator_params'] = dnnlib.EasyDict(state['generator_params'])
+
     state['renderer'].init_network(
         state['generator_params'],  # res
         valid_checkpoints_dict[state['pretrained_weight']],  # pkl
@@ -198,7 +201,9 @@ with gr.Blocks() as app:
         "curr_point": None,
         "curr_type_point": "start",
         'editing_state': 'add_points',
-        'pretrained_weight': init_pkl
+        'pretrained_weight': init_pkl,
+        'tracker_name': 'DragGAN (Baseline)',
+        'mask_handler_name': 'DragGAN (Baseline)'
     })
 
     # init image
@@ -258,6 +263,11 @@ with gr.Blocks() as app:
                     with gr.Column(scale=1, min_width=10):
                         gr.Markdown(value='Drag', show_label=False)
                     with gr.Column(scale=4, min_width=10):
+                        form_tracker_dropdown = gr.Dropdown(
+                            choices=['DragGAN (Baseline)', 'RAFT Large (Optical Flow)', 'Deep Particle (PIPs-like)', 'PIPs-Inspired (Momentum)', 'WCAT (Weighted Context-Aware Tracker)'],
+                            label="Tracking Method",
+                            value='DragGAN (Baseline)',
+                        )
                         with gr.Row():
                             with gr.Column(scale=1, min_width=10):
                                 enable_add_points = gr.Button('Add Points')
@@ -278,6 +288,11 @@ with gr.Blocks() as app:
                     with gr.Column(scale=1, min_width=10):
                         gr.Markdown(value='Mask', show_label=False)
                     with gr.Column(scale=4, min_width=10):
+                        form_mask_handler_dropdown = gr.Dropdown(
+                            choices=['DragGAN (Baseline)', 'Feature Blending (Robust)'],
+                            label="Masking Method",
+                            value='DragGAN (Baseline)',
+                        )
                         enable_add_mask = gr.Button('Edit Flexible Area')
                         with gr.Row():
                             with gr.Column(scale=1, min_width=10):
@@ -306,9 +321,16 @@ with gr.Blocks() as app:
             with gr.Column(scale=8):
                 form_image = ImageMask(
                     value=global_state.value['images']['image_show'],
-                    brush_radius=20).style(
-                        width=768,
-                        height=768)  # NOTE: hard image size code here.
+                    brush_radius=20,
+                    elem_id="image_mask_output")
+                
+                with gr.Accordion("Difference Map (Background Consistency)", open=False):
+                    form_diff_image = gr.Image(
+                        label="Difference from initial image (5x boosted)",
+                        interactive=False,
+                        visible=True,
+                        elem_id="diff_image_output"
+                    )
     gr.Markdown("""
         ## Quick Start
 
@@ -337,6 +359,15 @@ with gr.Blocks() as app:
                 text-align: center;
                 line-height: 50px;
                 width: 100%;
+            }
+            #image_mask_output, #diff_image_output {
+                max-width: 512px !important;
+            }
+            /* Ensure the canvas/image doesn't exceed 512x512 but allows space for toolbars */
+            #image_mask_output img, #image_mask_output canvas {
+                max-width: 512px !important;
+                max-height: 512px !important;
+                object-fit: contain;
             }
         </style>
         <div class="container">
@@ -443,6 +474,26 @@ with gr.Blocks() as app:
         outputs=[global_state],
     )
 
+    def on_change_tracker(tracker_name, global_state):
+        global_state['tracker_name'] = tracker_name
+        return global_state
+
+    form_tracker_dropdown.change(
+        on_change_tracker,
+        inputs=[form_tracker_dropdown, global_state],
+        outputs=[global_state],
+    )
+
+    def on_change_mask_handler(mask_handler_name, global_state):
+        global_state['mask_handler_name'] = mask_handler_name
+        return global_state
+
+    form_mask_handler_dropdown.change(
+        on_change_mask_handler,
+        inputs=[form_mask_handler_dropdown, global_state],
+        outputs=[global_state],
+    )
+
     def on_click_start(global_state, image):
         p_in_pixels = []
         t_in_pixels = []
@@ -480,7 +531,9 @@ with gr.Blocks() as app:
                 gr.Button.update(interactive=False),
 
                 # update other comps
-                gr.Dropdown.update(interactive=True),
+                gr.Dropdown.update(interactive=True), # Pretrained Model
+                gr.Dropdown.update(interactive=True), # Tracking Method
+                gr.Dropdown.update(interactive=True), # Masking Method
                 gr.Number.update(interactive=True),
                 gr.Number.update(interactive=True),
                 gr.Button.update(interactive=True),
@@ -511,6 +564,8 @@ with gr.Blocks() as app:
             drag_mask = 1 - mask
 
             renderer: Renderer = global_state["renderer"]
+            renderer.set_tracker(global_state['tracker_name'])
+            renderer.set_mask_handler(global_state['mask_handler_name'])
             global_state['temporal_params']['stop'] = False
             global_state['editing_state'] = 'running'
 
@@ -549,6 +604,9 @@ with gr.Blocks() as app:
                     is_drag=True,
                     to_pil=True)
 
+                # Sync points from renderer result
+                p_to_opt = global_state['generator_params'].points
+
                 if step_idx % global_state['draw_interval'] == 0:
                     print('Current Source:')
                     for key_point, p_i, t_i in zip(valid_points, p_to_opt,
@@ -566,6 +624,8 @@ with gr.Blocks() as app:
                         print(f'    {start_temp}')
 
                     image_result = global_state['generator_params']['image']
+                    diff_map = getattr(global_state['generator_params'], 'diff_map', None)
+                    
                     image_draw = update_image_draw(
                         image_result,
                         global_state['points'],
@@ -576,30 +636,25 @@ with gr.Blocks() as app:
                     global_state['images']['image_raw'] = image_result
 
                 yield (
-                    global_state,
-                    step_idx,
-                    global_state['images']['image_show'],
-                    # gr.File.update(visible=False),
-                    gr.Button.update(interactive=False),
-                    gr.Button.update(interactive=False),
-                    gr.Button.update(interactive=False),
-                    gr.Button.update(interactive=False),
-                    gr.Button.update(interactive=False),
-                    # latent space
-                    gr.Radio.update(interactive=False),
-                    gr.Button.update(interactive=False),
-                    # enable stop button in loop
-                    gr.Button.update(interactive=True),
-
-                    # update other comps
-                    gr.Dropdown.update(interactive=False),
-                    gr.Number.update(interactive=False),
-                    gr.Number.update(interactive=False),
-                    gr.Button.update(interactive=False),
-                    gr.Button.update(interactive=False),
-                    gr.Checkbox.update(interactive=False),
-                    # gr.Number.update(interactive=False),
-                    gr.Number.update(interactive=False),
+                    global_state,       # 1
+                    step_idx,           # 2
+                    global_state['images']['image_show'], # 3
+                    diff_map,           # 4
+                    gr.Button.update(interactive=False), # 5
+                    gr.Button.update(interactive=False), # 6
+                    gr.Button.update(interactive=False), # 7
+                    gr.Button.update(interactive=False), # 8
+                    gr.Button.update(interactive=False), # 9
+                    gr.Radio.update(interactive=False),  # 10
+                    gr.Button.update(interactive=False), # 11
+                    gr.Button.update(interactive=True),  # 12
+                    gr.Dropdown.update(interactive=False), # 13
+                    gr.Dropdown.update(interactive=False), # 14
+                    gr.Dropdown.update(interactive=False), # 15
+                    gr.Number.update(interactive=False), # 16
+                    gr.Number.update(interactive=False), # 17
+                    gr.Checkbox.update(interactive=False), # 18
+                    gr.Number.update(interactive=False), # 19
                 )
 
                 # increate step
@@ -617,29 +672,28 @@ with gr.Blocks() as app:
             # image_result.save(fp, "PNG")
 
             global_state['editing_state'] = 'add_points'
+            diff_map = getattr(global_state['generator_params'], 'diff_map', None)
 
             yield (
-                global_state,
-                0,  # reset step to 0 after stop.
-                global_state['images']['image_show'],
-                # gr.File.update(visible=True, value=fp.name),
-                gr.Button.update(interactive=True),
-                gr.Button.update(interactive=True),
-                gr.Button.update(interactive=True),
-                gr.Button.update(interactive=True),
-                gr.Button.update(interactive=True),
-                # latent space
-                gr.Radio.update(interactive=True),
-                gr.Button.update(interactive=True),
-                # NOTE: disable stop button with loop finish
-                gr.Button.update(interactive=False),
-
-                # update other comps
-                gr.Dropdown.update(interactive=True),
-                gr.Number.update(interactive=True),
-                gr.Number.update(interactive=True),
-                gr.Checkbox.update(interactive=True),
-                gr.Number.update(interactive=True),
+                global_state,       # 1
+                0,                  # 2
+                global_state['images']['image_show'], # 3
+                diff_map,           # 4
+                gr.Button.update(interactive=True), # 5
+                gr.Button.update(interactive=True), # 6
+                gr.Button.update(interactive=True), # 7
+                gr.Button.update(interactive=True), # 8
+                gr.Button.update(interactive=True), # 9
+                gr.Radio.update(interactive=True),  # 10
+                gr.Button.update(interactive=True), # 11
+                gr.Button.update(interactive=False), # 12
+                gr.Dropdown.update(interactive=True), # 13
+                gr.Dropdown.update(interactive=True), # 14
+                gr.Dropdown.update(interactive=True), # 15
+                gr.Number.update(interactive=True),   # 16
+                gr.Number.update(interactive=True),   # 17
+                gr.Checkbox.update(interactive=True), # 18
+                gr.Number.update(interactive=True),   # 19
             )
 
     form_start_btn.click(
@@ -649,6 +703,7 @@ with gr.Blocks() as app:
             global_state,
             form_steps_number,
             form_image,
+            form_diff_image, # Added diff image
             # form_download_result_file,
             # >>> buttons
             form_reset_image,
@@ -662,6 +717,8 @@ with gr.Blocks() as app:
             # <<< buttonm
             # >>> inputs comps
             form_pretrained_dropdown,
+            form_tracker_dropdown,
+            form_mask_handler_dropdown, # Added
             form_seed_number,
             form_lr_number,
             show_mask,

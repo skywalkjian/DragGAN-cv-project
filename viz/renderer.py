@@ -21,6 +21,8 @@ import matplotlib.cm
 import dnnlib
 from torch_utils.ops import upfirdn2d
 import legacy # pylint: disable=import-error
+from .trackers import get_tracker
+from .mask_handlers import get_mask_handler
 
 #----------------------------------------------------------------------------
 
@@ -53,7 +55,10 @@ def add_watermark_np(input_image_array, watermark_text="AI Generated"):
     font = ImageFont.truetype('arial.ttf', round(25/512*image.size[0]))
     d = ImageDraw.Draw(txt)
 
-    text_width, text_height = font.getsize(watermark_text)
+    # text_width, text_height = font.getsize(watermark_text)
+    left, top, right, bottom = font.getbbox(watermark_text)
+    text_width = right - left
+    text_height = bottom - top
     text_position = (image.size[0] - text_width - 10, image.size[1] - text_height - 10)
     text_color = (255, 255, 255, 128)  # white color with the alpha channel set to semi-transparent
 
@@ -81,6 +86,19 @@ class Renderer:
             self._end_event     = torch.cuda.Event(enable_timing=True)
         self._disable_timing = disable_timing
         self._net_layers    = dict()    # {cache_key: [dnnlib.EasyDict, ...], ...}
+        self.tracker        = get_tracker('DragGAN (Baseline)')
+        self.mask_handler   = get_mask_handler('DragGAN (Baseline)')
+        self.prev_img       = None
+
+    def set_tracker(self, tracker_name):
+        self.tracker = get_tracker(tracker_name)
+
+    def set_mask_handler(self, mask_handler_name):
+        self.mask_handler = get_mask_handler(mask_handler_name)
+
+    def get_resolution(self, pkl):
+        G = self.get_network(pkl, 'G_ema')
+        return G.img_resolution
 
     def render(self, **args):
         if self._disable_timing:
@@ -97,21 +115,21 @@ class Renderer:
                 if self.pkl != args['pkl']:
                     init_net = True
             if hasattr(self, 'w_load'):
-                if self.w_load is not args['w_load']:
+                if self.w_load is not args.get('w_load', None):
                     init_net = True
             if hasattr(self, 'w0_seed'):
-                if self.w0_seed != args['w0_seed']:
+                if self.w0_seed != args.get('w0_seed', 0):
                     init_net = True
             if hasattr(self, 'w_plus'):
-                if self.w_plus != args['w_plus']:
+                if self.w_plus != args.get('w_plus', True):
                     init_net = True
-            if args['reset_w']:
+            if args.get('reset_w', False):
                 init_net = True
             res.init_net = init_net
             if init_net:
                 self.init_network(res, **args)
             self._render_drag_impl(res, **args)
-        except:
+        except Exception as e:
             res.error = CapturedException()
         if not self._disable_timing:
             self._end_event.record(torch.cuda.current_stream(self._device))
@@ -128,6 +146,7 @@ class Renderer:
             self._end_event.synchronize()
             res.render_time = self._start_event.elapsed_time(self._end_event) * 1e-3
             self._is_timing = False
+            
         return res
 
     def get_network(self, pkl, key, **tweak_kwargs):
@@ -269,6 +288,27 @@ class Renderer:
         print(f'Rebuild optimizer with lr: {lr}')
         print('    Remain feat_refs and points0_pt')
 
+    def _preprocess_for_tracking(self, feat, img, points, targets, track_res=512):
+        h_orig = img.shape[2]
+        scale_track = track_res / h_orig
+        
+        # Pre-process features for tracking (Unified Filtering/Resizing)
+        feat_for_track = []
+        for f in feat:
+            if f.shape[2] != track_res or f.shape[3] != track_res:
+                f = F.interpolate(f, [track_res, track_res], mode='bilinear', align_corners=False)
+            feat_for_track.append(f)
+            
+        points_track = [[p[0] * scale_track, p[1] * scale_track] for p in points]
+        targets_track = [[p[0] * scale_track, p[1] * scale_track] for p in targets]
+        
+        # Resize curr_img if tracker uses it
+        img_track = img
+        if img.shape[2] != track_res or img.shape[3] != track_res:
+            img_track = F.interpolate(img, [track_res, track_res], mode='bilinear', align_corners=False)
+            
+        return feat_for_track, img_track, points_track, targets_track, scale_track
+
     def _render_drag_impl(self, res,
         points          = [],
         targets         = [],
@@ -295,15 +335,36 @@ class Renderer:
     ):
         G = self.G
         ws = self.w
+        
+        # Use separate indices for tracking and supervision if supported by tracker
+        tracking_idx = feature_idx
+        supervision_idx = feature_idx
+        
+        if hasattr(self.tracker, 'tracking_feature_idx'):
+            tracking_idx = self.tracker.tracking_feature_idx
+        if hasattr(self.tracker, 'supervision_feature_idx'):
+            supervision_idx = self.tracker.supervision_feature_idx
+        
         if ws.dim() == 2:
             ws = ws.unsqueeze(1).repeat(1,6,1)
         ws = torch.cat([ws[:,:6,:], self.w0[:,6:,:]], dim=1)
         if hasattr(self, 'points'):
             if len(points) != len(self.points):
                 reset = True
+        if kwargs.get('reset_w', False):
+            reset = True
+            
         if reset:
+            if hasattr(self, 'img0'):
+                del self.img0
             self.feat_refs = None
             self.points0_pt = None
+            self.prev_img = None
+            if self.tracker is not None:
+                self.tracker.reset()
+            if hasattr(self, 'mask_handler') and hasattr(self.mask_handler, 'reset'):
+                self.mask_handler.reset()
+            torch.cuda.empty_cache()
         self.points = points
 
         # Run synthesis network.
@@ -316,55 +377,71 @@ class Renderer:
             X = torch.linspace(0, h, h)
             Y = torch.linspace(0, w, w)
             xx, yy = torch.meshgrid(X, Y)
-            feat_resize = F.interpolate(feat[feature_idx], [h, w], mode='bilinear')
+            feat_resize = F.interpolate(feat[supervision_idx], [h, w], mode='bilinear')
             if self.feat_refs is None:
-                self.feat0_resize = F.interpolate(feat[feature_idx].detach(), [h, w], mode='bilinear')
+                self.feat0_resize = F.interpolate(feat[supervision_idx].detach(), [h, w], mode='bilinear')
                 self.feat_refs = []
                 for point in points:
                     py, px = round(point[0]), round(point[1])
                     self.feat_refs.append(self.feat0_resize[:,:,py,px])
                 self.points0_pt = torch.Tensor(points).unsqueeze(0).to(self._device) # 1, N, 2
 
-            # Point tracking with feature matching
-            with torch.no_grad():
-                for j, point in enumerate(points):
-                    r = round(r2 / 512 * h)
-                    up = max(point[0] - r, 0)
-                    down = min(point[0] + r + 1, h)
-                    left = max(point[1] - r, 0)
-                    right = min(point[1] + r + 1, w)
-                    feat_patch = feat_resize[:,:,up:down,left:right]
-                    L2 = torch.linalg.norm(feat_patch - self.feat_refs[j].reshape(1,-1,1,1), dim=1)
-                    _, idx = torch.min(L2.view(1,-1), -1)
-                    width = right - left
-                    point = [idx.item() // width + up, idx.item() % width + left]
-                    points[j] = point
+            # Mask handling and Feature Blending
+            mask_loss = 0
+            if mask is not None:
+                mask_loss, feat_resize = self.mask_handler.handle_mask(
+                    feat_resize, self.feat0_resize, mask, lambda_mask=lambda_mask
+                )
+
+            # Point tracking with selected tracker
+            feat_for_track, img_track, points_track, targets_track, scale_track = self._preprocess_for_tracking(
+                feat, img, points, targets, track_res=512
+            )
+            
+            # Call tracker with unified resolution
+            points_track = self.tracker.track(feat_for_track, points_track, (r2 * scale_track), 512, 512, 
+                                              targets=targets_track, curr_img=img_track)
+            
+            # Scale points back to original resolution
+            points = [[p[0] / scale_track, p[1] / scale_track] for p in points_track]
 
             res.points = [[point[0], point[1]] for point in points]
 
             # Motion supervision
             loss_motion = 0
             res.stop = True
+            
+            # Use the (possibly modified) feat_resize for supervision
+            f_s = feat_resize
+            
             for j, point in enumerate(points):
                 direction = torch.Tensor([targets[j][1] - point[1], targets[j][0] - point[0]])
                 if torch.linalg.norm(direction) > max(2 / 512 * h, 2):
                     res.stop = False
+                
                 if torch.linalg.norm(direction) > 1:
+                    # Modular adaptive supervision config from tracker
+                    adaptive_r1, loss_weight = self.tracker.get_supervision_config(j, r1)
+                    
                     distance = ((xx.to(self._device) - point[0])**2 + (yy.to(self._device) - point[1])**2)**0.5
-                    relis, reljs = torch.where(distance < round(r1 / 512 * h))
+                    relis, reljs = torch.where(distance < round(adaptive_r1 / 512 * h))
                     direction = direction / (torch.linalg.norm(direction) + 1e-7)
                     gridh = (relis+direction[1]) / (h-1) * 2 - 1
                     gridw = (reljs+direction[0]) / (w-1) * 2 - 1
                     grid = torch.stack([gridw,gridh], dim=-1).unsqueeze(0).unsqueeze(0)
-                    target = F.grid_sample(feat_resize.float(), grid, align_corners=True).squeeze(2)
-                    loss_motion += F.l1_loss(feat_resize[:,:,relis,reljs].detach(), target)
+                    
+                    target_s = F.grid_sample(f_s.float(), grid, align_corners=True).squeeze(2)
+                    
+                    # Apply modular loss weight
+                    loss_motion += loss_weight * F.l1_loss(f_s[:,:,relis,reljs].detach(), target_s)
 
             loss = loss_motion
-            if mask is not None:
-                if mask.min() == 0 and mask.max() == 1:
-                    mask_usq = mask.to(self._device).unsqueeze(0).unsqueeze(0)
-                    loss_fix = F.l1_loss(feat_resize * mask_usq, self.feat0_resize * mask_usq)
-                    loss += lambda_mask * loss_fix
+            
+            # Add extra supervision loss from tracker (Modular Interface)
+            loss += self.tracker.compute_supervision_loss(feat, points, targets, curr_img=img)
+            
+            # Add mask loss from handler
+            loss += mask_loss
 
             loss += reg * F.l1_loss(ws, self.w0)  # latent code regularization
             if not res.stop:
@@ -384,5 +461,33 @@ class Renderer:
             img = Image.fromarray(img)
         res.image = img
         res.w = ws.detach().cpu().numpy()
+
+        # Calculate MD (Mean Distance) if targets are provided
+        if is_drag and len(targets) > 0:
+            p_current = torch.tensor(points, device=self._device, dtype=torch.float32)
+            t_target = torch.tensor(targets, device=self._device, dtype=torch.float32)
+            md = torch.mean(torch.norm(p_current - t_target, dim=1)).item()
+            res.md = md
+
+        # Generate difference map for background visualization
+        if is_drag:
+            # Get current image as numpy array (handle PIL or Tensor)
+            if isinstance(res.image, torch.Tensor):
+                curr_img_np = res.image.detach().cpu().numpy().astype(np.float32)
+            else:
+                curr_img_np = np.array(res.image).astype(np.float32)
+            
+            # Get original image for comparison
+            if not hasattr(self, 'img0'):
+                # We need to store the first image of the drag session
+                self.img0 = curr_img_np
+            
+            diff = np.abs(curr_img_np - self.img0)
+            # Boost the difference for visualization (scale up)
+            diff_boosted = (diff * 5.0).clip(0, 255).astype(np.uint8)
+            res.diff_map = diff_boosted
+        else:
+            if hasattr(self, 'img0'):
+                del self.img0
 
 #----------------------------------------------------------------------------
