@@ -34,7 +34,7 @@ def set_random_seed(seed=42):
     torch.backends.cudnn.benchmark = False
     print(f"[Info] Random seed set to {seed}")
 
-def run_eval(config_name, test_cases, steps=50, device='cuda', mask_handler_name='DragGAN (Baseline)', use_mask=True, save_dir=None):
+def run_eval(config_name, test_cases, steps=50, device='cuda', mask_handler_name='Baseline', use_mask=True, save_dir=None):
     renderer = Renderer(disable_timing=True)
     results = []
     
@@ -275,8 +275,8 @@ if __name__ == "__main__":
         print(f"Sample case: {test_cases[0]}")
 
     eval_configs = [
-        {"tracker": "DragGAN (Baseline)", "mask": "DragGAN (Baseline)", "label": "Baseline (Nearest Neighbor)", "use_mask": False},
-        {"tracker": "WCAT (Weighted Context-Aware Tracker)", "mask": "DragGAN (Baseline)", "label": "WCAT (Context-Aware)", "use_mask": False},
+        {"tracker": "Baseline", "mask": "Baseline", "label": "Baseline (Nearest Neighbor)", "use_mask": False},
+        {"tracker": "WCAT", "mask": "Baseline", "label": "WCAT (Weighted Context-Aware)", "use_mask": False},
     ]
     
     # Structure to hold all results: {step: {method: [results]}}

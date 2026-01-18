@@ -1,138 +1,126 @@
-<p align="center">
+DragGAN-CV25Fall: Enhanced Interactive Point-based Image Editing
+================================================================
 
-  <h1 align="center">Drag Your GAN: Interactive Point-based Manipulation on the Generative Image Manifold</h1>
-  <p align="center">
-    <a href="https://xingangpan.github.io/"><strong>Xingang Pan</strong></a>
-    ·
-    <a href="https://ayushtewari.com/"><strong>Ayush Tewari</strong></a>
-    ·
-    <a href="https://people.mpi-inf.mpg.de/~tleimkue/"><strong>Thomas Leimkühler</strong></a>
-    ·
-    <a href="https://lingjie0206.github.io/"><strong>Lingjie Liu</strong></a>
-    ·
-    <a href="https://www.meka.page/"><strong>Abhimitra Meka</strong></a>
-    ·
-    <a href="http://www.mpi-inf.mpg.de/~theobalt/"><strong>Christian Theobalt</strong></a>
-  </p>
-  <h2 align="center">SIGGRAPH 2023 Conference Proceedings</h2>
-  <div align="center">
-    <img src="DragGAN.gif", width="600">
-  </div>
+This repository contains the source code for the "Computer Vision (2025 Fall)" course project.
+This project extends the original DragGAN by integrating advanced point tracking methods (Weighted Context-Aware Tracker) and mask preservation techniques (Loss Scheduling) to improve the stability and accuracy of interactive image editing.
 
-  <p align="center">
-  <br>
-    <a href="https://pytorch.org/get-started/locally/"><img alt="PyTorch" src="https://img.shields.io/badge/PyTorch-ee4c2c?logo=pytorch&logoColor=white"></a>
-    <a href="https://twitter.com/XingangP"><img alt='Twitter' src="https://img.shields.io/twitter/follow/XingangP?label=%40XingangP"></a>
-    <a href="https://arxiv.org/abs/2305.10973">
-      <img src='https://img.shields.io/badge/Paper-PDF-green?style=for-the-badge&logo=adobeacrobatreader&logoWidth=20&logoColor=white&labelColor=66cc00&color=94DD15' alt='Paper PDF'>
-    </a>
-    <a href='https://vcai.mpi-inf.mpg.de/projects/DragGAN/'>
-      <img src='https://img.shields.io/badge/DragGAN-Page-orange?style=for-the-badge&logo=Google%20chrome&logoColor=white&labelColor=D35400' alt='Project Page'></a>
-    <a href="https://colab.research.google.com/drive/1mey-IXPwQC_qSthI5hO-LTX7QL4ivtPh?usp=sharing"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"></a>
-  </p>
-</p>
+Overview
+--------
+Our implementation enhances the original DragGAN framework with the following key features:
+*   **Weighted Context-Aware Tracker (WCAT)**: A robust tracking mechanism that utilizes weighted context features to maintain accurate point correspondence during large deformations.
+*   **Loss Scheduling Mask Handler**: A dynamic masking strategy that adapts the reconstruction loss weight over optimization steps, effectively preserving non-edited regions while allowing flexible deformations in the target area.
+*   **Unified Experiment Framework**: A comprehensive script for batch evaluation and comparison of different tracking and masking configurations.
 
-## Web Demos
+1. Installation
+2. Interactive Editing
+3. Batch Experiments
+4. Project Structure
+5. Supplementary Material
+6. Acknowledgments
 
-[![Open in OpenXLab](https://cdn-static.openxlab.org.cn/app-center/openxlab_app.svg)](https://openxlab.org.cn/apps/detail/XingangPan/DragGAN)
+1. Installation
+---------------
+This project is optimized for performance using NVIDIA GPUs and CUDA. While it may run on other platforms, we strongly recommend using an NVIDIA GPU for the best experience.
 
-<p align="left">
-  <a href="https://huggingface.co/spaces/radames/DragGan"><img alt="Huggingface" src="https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-DragGAN-orange"></a>
-</p>
+### **Prerequisites**
+- **NVIDIA GPU**: Required for CUDA acceleration.
+- **CUDA Toolkit**: 11.7 or newer.
+- **C++ Compiler**: 
+  - **Linux**: `gcc` (usually pre-installed).
+  - **Windows**: Visual Studio 2019 or newer with "Desktop development with C++" workload.
 
-## Requirements
-
-If you have CUDA graphic card, please follow the requirements of [NVlabs/stylegan3](https://github.com/NVlabs/stylegan3#requirements).  
-
-The usual installation steps involve the following commands, they should set up the correct CUDA version and all the python packages
-
-```
+### **Environment Setup**
+We recommend using Conda:
+```bash
 conda env create -f environment.yml
-conda activate stylegan3
+conda activate draggan_project
 ```
 
-Then install the additional requirements
+### **PyTorch Installation (CUDA Recommended)**
+Install the version of PyTorch that matches your CUDA toolkit:
+```bash
+# Example for CUDA 12.1
+pip install torch torchvision --extra-index-url https://download.pytorch.org/whl/cu121
 
-```
-pip install -r requirements.txt
-```
-
-Otherwise (for GPU acceleration on MacOS with Silicon Mac M1/M2, or just CPU) try the following:
-
-```sh
-cat environment.yml | \
-  grep -v -E 'nvidia|cuda' > environment-no-nvidia.yml && \
-    conda env create -f environment-no-nvidia.yml
-conda activate stylegan3
-
-# On MacOS
-export PYTORCH_ENABLE_MPS_FALLBACK=1
+# Example for CUDA 11.8
+pip install torch torchvision --extra-index-url https://download.pytorch.org/whl/cu118
 ```
 
-## Run Gradio visualizer in Docker 
-
-Provided docker image is based on NGC PyTorch repository. To quickly try out visualizer in Docker, run the following:  
-
-```sh
-# before you build the docker container, make sure you have cloned this repo, and downloaded the pretrained model by `python scripts/download_model.py`.
-docker build . -t draggan:latest  
-docker run -p 7860:7860 -v "$PWD":/workspace/src -it draggan:latest bash
-# (Use GPU)if you want to utilize your Nvidia gpu to accelerate in docker, please add command tag `--gpus all`, like:
-#   docker run --gpus all  -p 7860:7860 -v "$PWD":/workspace/src -it draggan:latest bash
-
-cd src && python visualizer_drag_gradio.py --listen
-```
-Now you can open a shared link from Gradio (printed in the terminal console).   
-Beware the Docker image takes about 25GB of disk space!
-
-## Download pre-trained StyleGAN2 weights
-
-To download pre-trained weights, simply run:
-
-```
+### **Download Pre-trained Models**
+```bash
 python scripts/download_model.py
 ```
-If you want to try StyleGAN-Human and the Landscapes HQ (LHQ) dataset, please download weights from these links: [StyleGAN-Human](https://drive.google.com/file/d/1dlFEHbu-WzQWJl7nBBZYcTyo000H9hVm/view?usp=sharing), [LHQ](https://drive.google.com/file/d/16twEf0T9QINAEoMsWefoWiyhcTd-aiWc/view?usp=sharing), and put them under `./checkpoints`.
+This will download checkpoints (e.g., stylegan2_lions_512_pytorch.pkl) to the `checkpoints` directory.
 
-Feel free to try other pretrained StyleGAN.
+2. Interactive Editing
+----------------------
+We provide a user-friendly Gradio interface for interactive image manipulation.
 
-## Run DragGAN GUI
-
-To start the DragGAN GUI, simply run:
-```sh
-sh scripts/gui.sh
-```
-If you are using windows, you can run:
-```
-.\scripts\gui.bat
-```
-
-This GUI supports editing GAN-generated images. To edit a real image, you need to first perform GAN inversion using tools like [PTI](https://github.com/danielroich/PTI). Then load the new latent code and model weights to the GUI.
-
-You can run DragGAN Gradio demo as well, this is universal for both windows and linux:
-```sh
+Launch the visualizer:
+```bash
 python visualizer_drag_gradio.py
 ```
+Open your browser and navigate to the local URL (usually `http://127.0.0.1:7860`).
 
-## Acknowledgement
+### Basic Usage
+1.  **Select Model**: Choose a pre-trained model (e.g., Lion, Cat, Dog) from the "Pretrained Model" dropdown.
+2.  **Add Points**: Click on the image to add control points. The **Blue** point represents the handle (start) point, and the **Red** point represents the target point.
+3.  **Start Dragging**: Click the "Start" button to begin the optimization process. The image will deform to move the handle points towards the target points.
 
-This code is developed based on [StyleGAN3](https://github.com/NVlabs/stylegan3). Part of the code is borrowed from [StyleGAN-Human](https://github.com/stylegan-human/StyleGAN-Human).
+### Advanced Features
+Our enhanced UI offers additional controls for precise editing:
 
-(cheers to the community as well)
-## License
+*   **Tracking Method Selection**:
+    Located in the "Drag" section, use the `Tracking Method` dropdown to switch between:
+    *   `Baseline`: The original point tracking algorithm.
+    *   `WCAT`: The Weighted Context-Aware Tracker for improved robustness.
 
-The code related to the DragGAN algorithm is licensed under [CC-BY-NC](https://creativecommons.org/licenses/by-nc/4.0/).
-However, most of this project are available under a separate license terms: all codes used or modified from [StyleGAN3](https://github.com/NVlabs/stylegan3) is under the [Nvidia Source Code License](https://github.com/NVlabs/stylegan3/blob/main/LICENSE.txt).
+*   **Masking Method Selection**:
+    Located in the "Mask" section, use the `Masking Method` dropdown to switch between:
+    *   `Baseline`: Standard binary masking.
+    *   `Loss Scheduling`: Our advanced handler that dynamically adjusts loss weights to better preserve background details.
 
-Any form of use and derivative of this code must preserve the watermarking functionality showing "AI Generated".
+*   **Flexible Area Editing**:
+    Click the "Edit Flexible Area" button to switch to mask editing mode. Draw on the image to define the region allowed to move (the flexible area). The unmasked region will remain fixed.
 
-## BibTeX
+3. Batch Experiments
+--------------------
+To evaluate the performance of different trackers and mask handlers quantitatively, we provide a unified experiment script.
 
-```bibtex
-@inproceedings{pan2023draggan,
-    title={Drag Your GAN: Interactive Point-based Manipulation on the Generative Image Manifold},
-    author={Pan, Xingang and Tewari, Ayush, and Leimk{\"u}hler, Thomas and Liu, Lingjie and Meka, Abhimitra and Theobalt, Christian},
-    booktitle = {ACM SIGGRAPH 2023 Conference Proceedings},
-    year={2023}
-}
+Run experiments using `experiments/run_experiments.py`:
+
+```bash
+# Exp 1: Compare Baseline vs. WCAT on DragBench
+python experiments/run_experiments.py --exp 1 --steps 50
+
+# Exp 3: Evaluate Mask Stability on specific samples
+python experiments/run_experiments.py --exp 3 --steps 50
 ```
+
+The results, including generated images and comparison collages, will be saved in `experiments/results/`.
+
+4. Project Structure
+--------------------
+```
+DragGAN-CV25Fall/
+├── visualizer_drag_gradio.py  # Main Gradio application
+├── demo.mp4                   # Supplementary material video
+├── experiments/               # Experiment scripts and data
+│   └── run_experiments.py     # Unified batch evaluation script
+├── viz/                       # Core visualization and logic
+│   ├── trackers.py            # Tracker implementations (Baseline, WCAT)
+│   ├── mask_handlers.py       # Mask handler implementations (Loss Scheduling)
+│   └── renderer.py            # Rendering loop
+├── checkpoints/               # Pre-trained StyleGAN2 weights
+└── gradio_utils/              # UI utility functions
+```
+
+5. Supplementary Material
+--------------------------
+We provide a demonstration video `demo.mp4` as supplementary material. 
+
+The video showcases the robustness of our **Weighted Context-Aware Tracker (WCAT)** compared to the baseline in challenging scenarios with complex textures.
+
+6. Acknowledgments
+------------------
+This project is based on the official [DragGAN](https://github.com/XingangPan/DragGAN) repository. We acknowledge the authors for their excellent work and code release.

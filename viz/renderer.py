@@ -23,8 +23,10 @@ from torch_utils.ops import upfirdn2d
 import legacy # pylint: disable=import-error
 try:
     from .trackers import get_tracker
+    from .mask_handlers import get_mask_handler
 except ImportError:
     from trackers import get_tracker
+    from mask_handlers import get_mask_handler
 
 #----------------------------------------------------------------------------
 
@@ -76,8 +78,8 @@ def add_watermark_np(input_image_array, watermark_text="AI Generated"):
 
 class Renderer:
     def __init__(self, disable_timing=False):
-        self._device        = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu')
-        self._dtype         = torch.float32 if self._device.type == 'mps' else torch.float64
+        self._device        = torch.device('cuda')
+        self._dtype         = torch.float64
         self._pkl_data      = dict()    # {pkl: dict | CapturedException, ...}
         self._networks      = dict()    # {cache_key: torch.nn.Module, ...}
         self._pinned_bufs   = dict()    # {(shape, dtype): torch.Tensor, ...}
@@ -88,13 +90,18 @@ class Renderer:
             self._end_event     = torch.cuda.Event(enable_timing=True)
         self._disable_timing = disable_timing
         self._net_layers    = dict()    # {cache_key: [dnnlib.EasyDict, ...], ...}
-        # Integration of modular tracker
-        self.tracker        = get_tracker('DragGAN (Baseline)')
+        # Integration of modular tracker and mask handler
+        self.tracker        = get_tracker('Baseline')
+        self.mask_handler   = get_mask_handler('Baseline')
         self.prev_img       = None
 
     def set_tracker(self, tracker_name):
         """Updates the tracker used by the renderer."""
         self.tracker = get_tracker(tracker_name)
+
+    def set_mask_handler(self, mask_handler_name):
+        """Updates the mask handler used by the renderer."""
+        self.mask_handler = get_mask_handler(mask_handler_name)
 
     def get_resolution(self, pkl):
         G = self.get_network(pkl, 'G_ema')
@@ -363,6 +370,8 @@ class Renderer:
             self.prev_img = None
             if self.tracker is not None:
                 self.tracker.reset()
+            if self.mask_handler is not None:
+                self.mask_handler.reset()
             torch.cuda.empty_cache()
         self.points = points
 
@@ -385,12 +394,10 @@ class Renderer:
                     self.feat_refs.append(self.feat0_resize[:,:,py,px])
                 self.points0_pt = torch.Tensor(points).unsqueeze(0).to(self._device) # 1, N, 2
 
-            # Inline Mask handling (to avoid mask-related code changes in separate files)
+            # Modular Mask handling
             loss_mask = 0
             if mask is not None:
-                mask_tensor = torch.from_numpy(mask).to(self._device).float()
-                mask_tensor = F.interpolate(mask_tensor.unsqueeze(0).unsqueeze(0), [h, w], mode='nearest')
-                loss_mask = lambda_mask * F.l1_loss(feat_resize * (1 - mask_tensor), self.feat0_resize * (1 - mask_tensor))
+                loss_mask, _ = self.mask_handler.handle_mask(feat_resize, self.feat0_resize, mask, lambda_mask=lambda_mask)
 
             # Point tracking with selected modular tracker
             feat_for_track, img_track, points_track, targets_track, scale_track = self._preprocess_for_tracking(
